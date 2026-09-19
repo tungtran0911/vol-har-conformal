@@ -1,0 +1,7 @@
+numpy>=1.26
+pandas>=2.0
+scipy>=1.11
+matplotlib>=3.8
+# only to rebuild notebooks/A2_main.ipynb from notebooks/A2_main.py
+nbformat>=5.9
+nbclient>=0.10
