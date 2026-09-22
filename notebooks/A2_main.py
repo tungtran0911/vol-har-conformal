@@ -42,7 +42,7 @@ notebooks/build_notebook.py turns these cells into A2_main.ipynb (the Colab note
 # Loss functions - MSE $=\frac1n\sum(y-\hat y)^2$ and QLIKE $=\frac1n\sum\left(\frac{y}{\hat y} - \ln\frac{y}{\hat y} - 1\right)$
 
 # %%
-# -------------- STEP 1 IMPORTING NECESSARY LIBRARIES --------------
+# STEP 1 IMPORTING NECESSARY LIBRARIES
 
 import os
 
@@ -53,7 +53,7 @@ import pandas as pd
 os.makedirs("figures", exist_ok=True)  # every plot is also saved as a PNG for the report
 BLUE, ORANGE, AQUA, GREY = "#2a78d6", "#eb6834", "#1baf7a", "#52514e"
 
-# -------------- STEP 2 LOADS SPY DAILY PRICES --------------
+# STEP 2 LOADS SPY DAILY PRICES
 
 # Yahoo Finance, adjusted for splits and dividends, 2005-01-03 to 2026-08-31.
 # A fixed copy lives in the project repository, so every run uses identical data.
@@ -61,13 +61,13 @@ URL = "https://raw.githubusercontent.com/tungtran0911/vol-har-conformal/main/dat
 LOCAL = "data/spy_ohlc.csv"  # the same file, when the project folder is available
 prices = pd.read_csv(LOCAL if os.path.exists(LOCAL) else URL, index_col="date", parse_dates=True)
 
-# basic cleaning: drop missing or non-positive rows, and make sure low <= open, close <= high
+# drop missing or non-positive rows, and make sure low <= open, close <= high
 prices = prices.dropna()
 prices = prices[(prices > 0).all(axis=1)]
 prices["high"] = prices[["open", "high", "close"]].max(axis=1)
 prices["low"] = prices[["open", "low", "close"]].min(axis=1)
 
-# -------------- STEP 3 DAILY VARIANCE (the quantity we forecast) --------------
+# STEP 3 DAILY VARIANCE (the quantity we forecast)
 
 o, h, l, c = (np.log(prices[k]) for k in ["open", "high", "low", "close"])
 overnight = (o - c.shift(1)) ** 2  # yesterday's close -> today's open
@@ -77,7 +77,7 @@ returns = 100 * (c - c.shift(1)).reindex(v.index)  # daily log return in %, used
 print(f"daily variance: median {v.median():.2f}, maximum {v.max():.0f} on {v.idxmax().date()} | daily volatility: "
       f"10% of days below {np.sqrt(v.quantile(0.1)):.2f}%, maximum {np.sqrt(v.max()):.1f}%")
 
-# -------------- STEP 4 INPUT VARIABLES AND TARGET --------------
+# STEP 4 INPUT VARIABLES AND TARGET
 
 data = pd.DataFrame({
     "v_d": v,                     # today's variance
@@ -87,7 +87,7 @@ data = pd.DataFrame({
     "target_date": v.index.to_series().shift(-1),
 }).dropna()
 
-# -------------- STEP 5 SPLIT DATA BY DATE (never shuffled) --------------
+# STEP 5 SPLIT DATA BY DATE (never shuffled)
 
 # split on the date of the TARGET, so no training target falls inside the validation or test years
 train = data[data["target_date"] <= "2016-12-31"]
@@ -95,7 +95,7 @@ val = data[(data["target_date"] > "2016-12-31") & (data["target_date"] <= "2019-
 test = data[data["target_date"] > "2019-12-31"]
 print(f"{len(prices)} trading days -> {len(data)} samples: train {len(train)}, validation {len(val)}, test {len(test)}")
 
-# -------------- STEP 6 DEFINE LOSS FUNCTIONS (MSE and QLIKE) --------------
+# STEP 6 DEFINE LOSS FUNCTIONS (MSE and QLIKE)
 
 def calculate_mse(y_true, y_pred):
     # average squared error: a few very volatile days dominate it
@@ -103,7 +103,7 @@ def calculate_mse(y_true, y_pred):
 
 
 def calculate_qlike(y_true, y_pred):
-    # depends only on the ratio y / yhat: missing by 2x costs the same on a calm day and on a crisis day
+    # Log-combined relative ratio y/y_pred - log(y/y_pred) - 1
     ratio = y_true / y_pred
     return np.mean(ratio - np.log(ratio) - 1)
 
@@ -114,7 +114,7 @@ scores = {"Naive (tomorrow = today)": {"val MSE": calculate_mse(val["y"], val["v
 print(f"Naive forecast on validation: MSE {scores['Naive (tomorrow = today)']['val MSE']:.3f}, "
       f"QLIKE {scores['Naive (tomorrow = today)']['val QLIKE']:.4f}")
 
-# -------------- STEP 7 PLOT THE TARGET --------------
+# STEP 7 PLOT THE TARGET
 
 plt.figure(figsize=(9, 3))
 plt.plot(v.index, np.sqrt(252 * v), color=GREY, linewidth=0.6)
@@ -140,31 +140,31 @@ plt.show()
 # Optimisation Algorithm - Ordinary Least Squares (OLS): solve the normal equations $(X^\top X)\,b = X^\top y$
 
 # %%
-# -------------- STEP 1 SELECT THE INPUT VARIABLE --------------
+# STEP 1 SELECT THE INPUT VARIABLE
 
 X_train, y_train = train[["v_d"]].to_numpy(), train["y"].to_numpy()
 X_val, y_val = val[["v_d"]].to_numpy(), val["y"].to_numpy()
 
-# -------------- STEP 2 ADDS COLUMN OF ONES --------------
+# STEP 2 ADDS COLUMN OF ONES
 
 # the column of ones carries the intercept b0 (the forecast when today's variance is 0)
 X_train = np.c_[np.ones(X_train.shape[0]), X_train]
 X_val = np.c_[np.ones(X_val.shape[0]), X_val]
 
-# -------------- STEP 3 IMPLEMENT LINEAR REGRESSION WITH OLS --------------
+# STEP 3 IMPLEMENT LINEAR REGRESSION WITH OLS
 
 def ols(X, y):
     # b = (X^T X)^(-1) X^T y; solve() gives the same b without forming the inverse (numerically safer)
     return np.linalg.solve(X.T @ X, X.T @ y)
 
-# -------------- STEP 4 TRAINS SLR MODEL --------------
+# STEP 4 TRAINS SLR MODEL
 
 coefficients = ols(X_train, y_train)
 
 # Make predictions on the validation set
 y_val_pred = X_val @ coefficients  # represents the hypothesis function
 
-# -------------- STEP 5 EVALUATION --------------
+# STEP 5 EVALUATION
 
 scores["1. Simple LR"] = {"val MSE": calculate_mse(y_val, y_val_pred), "val QLIKE": calculate_qlike(y_val, y_val_pred)}
 print(f"Validation MSE: {scores['1. Simple LR']['val MSE']:.3f} | Validation QLIKE: {scores['1. Simple LR']['val QLIKE']:.4f}")
@@ -201,25 +201,25 @@ print(f"Slope (b1): {slope:.4f} -> {slope:.0%} of today's variance carries into 
 # Optimisation Algorithm - Ordinary Least Squares (OLS)
 
 # %%
-# -------------- STEP 1 SELECT THE INPUT VARIABLES --------------
+# STEP 1 SELECT THE INPUT VARIABLES
 
 har_inputs = ["v_d", "v_w", "v_m"]
 X_train, y_train = train[har_inputs].to_numpy(), train["y"].to_numpy()
 X_val, y_val = val[har_inputs].to_numpy(), val["y"].to_numpy()
 
-# -------------- STEP 2 ADDS COLUMN OF ONES --------------
+# STEP 2 ADDS COLUMN OF ONES
 
 X_train = np.c_[np.ones(X_train.shape[0]), X_train]
 X_val = np.c_[np.ones(X_val.shape[0]), X_val]
 
-# -------------- STEP 3 TRAINS THE MODEL WITH OLS (same function as above, now 4 columns) --------------
+# STEP 3 TRAINS THE MODEL WITH OLS (same function as above, now 4 columns)
 
 coefficients = ols(X_train, y_train)
 
 # Make predictions on the validation set
 y_val_pred = X_val @ coefficients  # hypothesis function
 
-# -------------- STEP 4 EVALUATION --------------
+# STEP 4 EVALUATION
 
 scores["2. HAR (OLS)"] = {"val MSE": calculate_mse(y_val, y_val_pred), "val QLIKE": calculate_qlike(y_val, y_val_pred)}
 print(f"Validation MSE: {scores['2. HAR (OLS)']['val MSE']:.3f} | Validation QLIKE: {scores['2. HAR (OLS)']['val QLIKE']:.4f}")
@@ -259,12 +259,12 @@ print(f"Persistence b_d + b_w + b_m = {coefficients[1:].sum():.3f} (simple LR: {
 # (STEP 6), to show what the QLIKE loss adds
 
 # %%
-# -------------- STEP 1 WHY QLIKE: under- vs over-prediction by 2x --------------
+# STEP 1 WHY QLIKE: under- vs over-prediction by 2x
 
 print(f"QLIKE(actual 2, predicted 1) = {calculate_qlike(2.0, 1.0):.3f}   (under-predicted risk)")
 print(f"QLIKE(actual 1, predicted 2) = {calculate_qlike(1.0, 2.0):.3f}   (over-predicted risk)")
 
-# -------------- STEP 2 LOG INPUTS, STANDARDISE, ADD COLUMN OF ONES --------------
+# STEP 2 LOG INPUTS, STANDARDISE, ADD COLUMN OF ONES
 
 F_train, y_train = np.log(train[har_inputs].to_numpy()), train["y"].to_numpy()
 F_val, y_val = np.log(val[har_inputs].to_numpy()), val["y"].to_numpy()
@@ -272,10 +272,10 @@ mean, std = F_train.mean(axis=0), F_train.std(axis=0)  # from the training set o
 X_train = np.c_[np.ones(len(F_train)), (F_train - mean) / std]
 X_val = np.c_[np.ones(len(F_val)), (F_val - mean) / std]
 
-# -------------- STEP 3 IMPLEMENT GRADIENT DESCENT ON QLIKE --------------
+# STEP 3 IMPLEMENT GRADIENT DESCENT ON QLIKE
 
 def gradient_descent(X, y, b, learning_rate=0.3, tol=1e-8, max_iter=20000):
-    # learning rate 0.3: the loss falls at every step (0.1 also works but needs 3x more iterations)
+    # learning rate 0.3: the loss falls at every step
     losses = []
     for _ in range(max_iter):
         y_pred = np.exp(X @ b)                    # hypothesis function
@@ -287,7 +287,7 @@ def gradient_descent(X, y, b, learning_rate=0.3, tol=1e-8, max_iter=20000):
         b = b - learning_rate * gradient
     return b, losses
 
-# -------------- STEP 4 TRAINS THE MODEL --------------
+# STEP 4 TRAINS THE MODEL
 
 b_start = np.array([np.log(y_train.mean()), 0.0, 0.0, 0.0])  # start: constant forecast = average variance
 for rate in (0.1, 0.3, 0.5):  # choosing the learning rate: all three reach the same minimum, 0.3 is 3x faster than 0.1
@@ -299,7 +299,7 @@ print(f"Gradient descent stopped after {len(losses) - 1} iterations, training QL
 # Make predictions on the validation set
 y_val_pred = np.exp(X_val @ b)
 
-# -------------- STEP 5 EVALUATION --------------
+# STEP 5 EVALUATION
 
 scores["3. HAR + QLIKE"] = {"val MSE": calculate_mse(y_val, y_val_pred), "val QLIKE": calculate_qlike(y_val, y_val_pred)}
 print(f"Validation MSE: {scores['3. HAR + QLIKE']['val MSE']:.3f} | Validation QLIKE: {scores['3. HAR + QLIKE']['val QLIKE']:.4f}")
@@ -319,7 +319,7 @@ plt.show()
 slopes = b[1:] / std  # undo the standardisation: coefficients on ln v_d, ln v_w, ln v_m
 print(f"Coefficients [b_d, b_w, b_m] on the log inputs: {np.round(slopes, 4)}")
 
-# -------------- STEP 6 COMPARE: THE SAME LOG MODEL FITTED BY OLS ON ln(y) --------------
+# STEP 6 COMPARE: THE SAME LOG MODEL FITTED BY OLS ON ln(y)
 
 # closed form, no gradient descent: regress ln(y) on the same inputs
 b_log = ols(X_train, np.log(y_train))
@@ -348,7 +348,7 @@ pd.DataFrame(scores).T.round(4)
 # 2017–2019, train on the $W$ days before it and forecast that day.
 
 # %%
-# -------------- STEP 1 ROLLING FORECAST (train on the last W days, forecast the next day) --------------
+# STEP 1 ROLLING FORECAST (train on the last W days, forecast the next day)
 
 V, Y = data[har_inputs].to_numpy(), data["y"].to_numpy()
 dates = data["target_date"]
@@ -373,7 +373,7 @@ def rolling_har_qlike(start, end, W):
         predictions.append(np.exp(x_today @ b))
     return np.array(predictions)
 
-# -------------- STEP 2 GRID SEARCH OVER W ON VALIDATION --------------
+# STEP 2 GRID SEARCH OVER W ON VALIDATION
 
 windows = [250, 500, 1000, 2000]
 val_qlike = {}
@@ -410,7 +410,7 @@ plt.show()
 from scipy.optimize import minimize
 from scipy.signal import lfilter
 
-# -------------- STEP 1 ROLLING FORECASTS FOR THE LINEAR MODELS --------------
+# STEP 1 ROLLING FORECASTS FOR THE LINEAR MODELS
 
 START, END = "2017-01-01", "2026-12-31"  # forecast every day from 2017; the test years are reported below
 rows = forecast_rows(START, END, best_W)
@@ -440,7 +440,7 @@ forecasts["har_qlike"] = rolling_har_qlike(START, END, best_W)
 forecasts["har_log_ols"] = rolling_log_ols(jensen=False)
 forecasts["har_log_ols_jensen"] = rolling_log_ols(jensen=True)
 
-# -------------- STEP 2 BASELINE: GARCH(1,1) --------------
+# STEP 2 BASELINE: GARCH(1,1)
 
 def garch_variance(params, r2, h0):
     # h[t+1] = omega + alpha * r2[t] + beta * h[t], starting from h0 (lfilter runs this loop in compiled code)
@@ -472,7 +472,7 @@ for k, i in enumerate(rows):
     garch.append(garch_variance(params, r2, r2.mean())[-1])
 forecasts["garch"] = garch
 
-# -------------- STEP 3 EVALUATION ON THE TEST YEARS --------------
+# STEP 3 EVALUATION ON THE TEST YEARS
 
 test_fc = forecasts[forecasts.index > "2019-12-31"]
 names = {"naive": "Naive (tomorrow = today)", "slr": "1. Simple LR", "har_ols": "2. HAR (OLS)",
@@ -492,7 +492,7 @@ for m in ["har_ols", "har_qlike", "garch"]:
     print(f"{names[m]:<24} 10 worst days = {squared_errors.nlargest(10).sum() / squared_errors.sum():.0%} of test MSE; "
           f"test MSE without March 2020 = {squared_errors[~march_2020].mean():.2f}")
 
-# -------------- STEP 4 PLOTS --------------
+# STEP 4 PLOTS
 
 crash = test_fc.loc["2020-02-01":"2020-06-30"]
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10.5, 4), gridspec_kw={"width_ratios": [1.5, 1]})
