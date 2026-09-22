@@ -539,3 +539,136 @@ plt.show()
 #
 # Limitations: the target is a noisy proxy of true variance, one asset only, a linear model with 3 inputs, a one-day
 # horizon, and no formal significance test of the differences.
+
+# %% [markdown]
+# # Verification
+#
+# Checks behind the numbers quoted in the journal. Nothing here changes a model: STEP 1 repeats the data description
+# (journal Sections 1.2, 1.3 and 4.1), STEP 2 measures how noisy a range estimator is (1.4), STEP 3 the curvature that
+# limits the learning rate (2.5), STEP 4 the Jensen factor and the normality it assumes (2.4), STEP 5 longer training
+# windows (4.2), STEP 6 the March 2020 edge cases (4.5), STEP 7 Diebold-Mariano tests of the loss differences (3.3 and
+# 4.3), STEP 8 the same losses year by year, STEP 9 the 99% Value-at-Risk behind the task objective (3.4), and STEP 10
+# the persistence of the GARCH baseline (6.3).
+
+# %%
+from math import erfc
+
+# STEP 1 DATA CHECKS
+
+raw = pd.read_csv(LOCAL if os.path.exists(LOCAL) else URL, index_col="date", parse_dates=True).dropna()
+repaired = int(((raw["high"] < raw[["open", "close"]].max(axis=1)) | (raw["low"] > raw[["open", "close"]].min(axis=1))).sum())
+share = overnight.reindex(v.index).mean() / (overnight + intraday).reindex(v.index).mean()
+hl2 = (np.log(prices["high"]) - np.log(prices["low"])) ** 2
+print(f"rows needing an H/L repair: {repaired}; smallest proxy value {v.min():.3f} %^2 (the floor of 1e-4 is never "
+      f"reached); smallest intraday term as a share of (ln H - ln L)^2 = {(intraday / hl2).min():.3f}")
+print(f"overnight share of the mean variance {share:.1%}; mean(v) / mean(r^2) = {v.mean() / (returns ** 2).mean():.3f}")
+slr_floor = ols(np.c_[np.ones(len(train)), train[["v_d"]].to_numpy()], train["y"].to_numpy())[0]
+print(f"mean proxy: train {train['y'].mean():.2f}, validation {val['y'].mean():.2f}, test {test['y'].mean():.2f}; "
+      f"{(val['y'] < slr_floor).mean():.1%} of validation days sit below the simple-regression floor {slr_floor:.3f}")
+
+# STEP 2 HOW NOISY IS A RANGE ESTIMATOR? 20,000 SIMULATED BROWNIAN DAYS, ONE PRICE PER MINUTE
+
+rng = np.random.default_rng(0)
+gk, r2 = [], []
+for _ in range(20):
+    path = np.c_[np.zeros(1000), rng.normal(0, np.sqrt(1 / 390), (1000, 390)).cumsum(axis=1)]  # true variance = 1
+    high, low, close = path.max(axis=1), path.min(axis=1), path[:, -1]
+    gk.append(0.5 * (high - low) ** 2 - (2 * np.log(2) - 1) * close ** 2)
+    r2.append(close ** 2)
+gk, r2 = np.concatenate(gk), np.concatenate(r2)
+print(f"simulated days: mean Garman-Klass {gk.mean():.2f} (1 = unbiased; minute sampling misses part of the range), "
+      f"variance of r^2 / variance of Garman-Klass = {r2.var() / gk.var():.1f}")
+
+# STEP 3 CURVATURE AND THE LARGEST USABLE LEARNING RATE
+
+u = y_train / np.exp(X_train @ b)
+hessian = (X_train * u[:, None]).T @ X_train / len(y_train)  # curvature of the QLIKE risk at the minimum
+lam = np.linalg.eigvalsh(hessian).max()
+print(f"largest eigenvalue at the minimum {lam:.2f}, so gradient descent is stable below 2/lambda = {2 / lam:.3f}")
+for eta in (0.70, 0.72):
+    with np.errstate(all="ignore"):
+        _, path = gradient_descent(X_train, y_train, b_start, learning_rate=eta)
+    print(f"  eta = {eta}: {len(path) - 1:5d} iterations, final training QLIKE {path[-1]:.4f}")
+
+# STEP 4 THE JENSEN FACTOR AND THE NORMALITY IT ASSUMES
+
+resid = np.log(y_train) - X_train @ b_log
+skew = ((resid - resid.mean()) ** 3).mean() / resid.std() ** 3
+kurtosis = ((resid - resid.mean()) ** 4).mean() / resid.std() ** 4 - 3
+print(f"Jensen factor exp(s^2/2) = {np.exp(residual_var / 2):.3f}; measured mean(actual/predicted) of the log-OLS fit "
+      f"on training = {np.mean(y_train / np.exp(X_train @ b_log)):.3f}")
+print(f"log residuals: skew {skew:.2f}, excess kurtosis {kurtosis:.2f} (both 0 for a normal distribution)")
+
+# STEP 5 LONGER TRAINING WINDOWS (3,000 would leave the first validation days without a full window)
+
+for W in (2500, 2998):
+    q = calculate_qlike(Y[forecast_rows("2017-01-01", "2019-12-31", W)],
+                        rolling_har_qlike("2017-01-01", "2019-12-31", W))
+    print(f"W = {W}: validation QLIKE {q:.4f}")
+
+# STEP 6 MARCH 2020 EDGE CASES
+
+X_all = np.c_[np.ones(len(data)), V]
+i = int(np.flatnonzero(data["target_date"].to_numpy() == np.datetime64("2020-03-17"))[0])
+b_day = ols(X_all[i - best_W:i], Y[i - best_W:i])
+print(f"2020-03-17 HAR (OLS) coefficients {np.round(b_day, 2)}: the weekly term alone contributes "
+      f"{b_day[2] * V[i, 1]:.0f} of the {X_all[i] @ b_day:.0f} %^2 forecast "
+      f"({np.sqrt(252 * X_all[i] @ b_day):.0f}% annualised, against an actual {np.sqrt(252 * Y[i]):.0f}%)")
+fitted = [ols(X_all[j - best_W:j], Y[j - best_W:j]) for j in rows]
+negative = data["target_date"].to_numpy()[rows][np.array([f[0] for f in fitted]) < 0]
+print(f"the fitted intercept is negative on {len(negative)} of {len(rows)} daily re-trainings "
+      f"({str(negative.min())[:10]} to {str(negative.max())[:10]}); the smallest HAR (OLS) forecast is "
+      f"{min(X_all[j] @ f for j, f in zip(rows, fitted)):.3f} %^2, so no forecast turned negative")
+
+# STEP 7 DIEBOLD-MARIANO TESTS ON THE DAILY LOSS DIFFERENCES
+
+def diebold_mariano(d, lags=None):
+    """t-statistic and two-sided p-value for mean(d) = 0, with a Newey-West long-run variance because daily losses
+    are autocorrelated. The default lag follows the usual rule 4 (n/100)^(2/9)."""
+    n = len(d)
+    lags = int(4 * (n / 100) ** (2 / 9)) if lags is None else lags
+    e = d - d.mean()
+    lrv = e @ e / n
+    for k in range(1, lags + 1):
+        lrv += 2 * (1 - k / (lags + 1)) * (e[k:] @ e[:-k]) / n
+    t = d.mean() / np.sqrt(lrv / n)
+    return lags, t, erfc(abs(t) / np.sqrt(2))
+
+
+daily_qlike = {m: (test_fc["y"] / test_fc[m] - np.log(test_fc["y"] / test_fc[m]) - 1).to_numpy() for m in names}
+print("d = daily QLIKE of the model - daily QLIKE of HAR + QLIKE; a positive t means HAR + QLIKE is better")
+for m in ["garch", "har_ols", "har_log_ols_jensen", "har_log_ols", "slr", "naive"]:
+    lags, t, p = diebold_mariano(daily_qlike[m] - daily_qlike["har_qlike"])
+    _, t0, p0 = diebold_mariano(daily_qlike[m] - daily_qlike["har_qlike"], lags=0)
+    print(f"  {names[m]:<26} lags {lags}: t {t:5.2f}, p {p:.3f}   (no correction: t {t0:5.2f}, p {p0:.3f})")
+
+# STEP 8 THE SAME LOSSES YEAR BY YEAR
+
+shown = ["har_ols", "har_qlike", "garch"]
+print("year " + " ".join(f"{names[m]:>24}" for m in shown))
+for year in sorted(set(test_fc.index.year)):
+    mask = test_fc.index.year == year
+    print(f"{year} " + " ".join(f"{calculate_qlike(test_fc['y'][mask], test_fc[m][mask]):24.4f}" for m in shown))
+years = sorted(set(test_fc.index.year))
+better = sum(calculate_qlike(test_fc["y"][test_fc.index.year == yr], test_fc["har_qlike"][test_fc.index.year == yr])
+             < calculate_qlike(test_fc["y"][test_fc.index.year == yr], test_fc["har_ols"][test_fc.index.year == yr])
+             for yr in years)
+print(f"HAR + QLIKE has the lower yearly QLIKE than HAR (OLS) in {better} of {len(years)} years")
+
+# STEP 9 THE TASK OBJECTIVE: 99% VALUE-AT-RISK EXCEEDANCES (target 1%)
+
+z99 = 2.326  # 99th percentile of the standard normal
+r_next = returns.reindex(test_fc.index).to_numpy()
+for m in ["har_qlike", "har_log_ols_jensen", "har_ols", "garch"]:
+    breaches = r_next < -z99 * np.sqrt(test_fc[m].to_numpy())
+    print(f"99% VaR from {names[m]:<26} exceeded on {breaches.mean():.2%} of test days ({breaches.sum()} days)")
+
+# STEP 10 PERSISTENCE OF THE GARCH BASELINE
+
+alpha_beta, params = [], None
+for k, j in enumerate(rows):
+    if params is None or k % 5 == 0:
+        params = fit_garch(returns.to_numpy()[position[j] - best_W + 1: position[j] + 1] ** 2, params)
+        alpha_beta.append(params[1] + params[2])
+print(f"GARCH alpha + beta over {len(alpha_beta)} refits: first {alpha_beta[0]:.2f}, median "
+      f"{np.median(alpha_beta):.2f}, range {min(alpha_beta):.2f} to {max(alpha_beta):.2f}")
